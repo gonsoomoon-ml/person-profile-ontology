@@ -993,6 +993,20 @@ correctness 결정이다. DynamoDB retention 절반은 verbatim 검증, Foundry 
 
 bulk-load 제약(검증): 동시 큐 최대 64 job, 최근 1,024 job만 추적 ([limits](https://docs.aws.amazon.com/neptune/latest/userguide/limits.html)). 대량 delete 트랜잭션은 로그 high-water mark를 영구 팽창시키므로(verbatim) **in-place 삭제 대신 export+reload로 슬림화** — Neptune은 6 copy를 1로 과금/128 TiB autoscale이라 raw 저장은 병목이 아니지만, 삭제로는 공간이 회수되지 않는다.
 
+**batch write가 read query에 미치는 영향 & 완화 (production).** 결론: **수천 개(예: 1,000) 노드 값 갱신은 production read에 사실상 영향 없음** — read는 snapshot isolation으로 일관된 시점을 보고 in-flight write에 막히지 않으며, read replica로 분리하면 writer 경합도 없다. read를 망치는 건 *갱신 개수*가 아니라 아래 요인들이다.
+
+| 원인 | 영향 | 완화 |
+|---|---|---|
+| 읽기를 **writer**에서 수행 (write 중 CPU/IO 경합) | read latency ↑ | **read replica로 라우팅** |
+| **replica lag** (지속적 고-write 시) | read가 약간 stale (보통 ms) | lag 모니터, bounded staleness 허용 |
+| **같은 노드/엣지** read+write 경합 | write 충돌(ConcurrentModification→retry); read는 snapshot이라 OK | version-fence, 키 단위 직렬화 |
+| **supernode 엣지** 대량 갱신 | 무거움 | node *property* 갱신은 가벼움 / edge pruning (§9.3) |
+| **하나의 거대 트랜잭션** | 자원·snapshot 압박 | **micro-batch로 분할** (수천 개도 작은 배치로) |
+
+batch write를 read에 사실상 "안 보이게" 하는 패턴: ① **읽기=replica/스냅샷, 쓰기=writer** 분리 ② **blue/green + 원자적 포인터 swap**(대량/스키마성 — read는 half-updated 상태를 못 봄) ③ **CDC micro-batch upsert**(single-writer spike 방지) ④ **hot scalar는 feature store**에 둬 그래프 read path를 아예 안 건드림.
+
+> 정직성: **Neptune Analytics(데모 엔진)** 는 in-memory analytics용이라 *동시 대량 mutation+query* 가 한 엔진에서 경합할 수 있다(데모의 `pageRank.mutate()`가 batch 성격인 이유). 프로덕션 NRT read+write는 Neptune **Database**(replica 분리) 또는 feature store가 제자리. 정확한 latency·lag·isolation 보장은 엔진·워크로드 의존 → PoC 측정 후 commit.
+
 ### 11.3 Recompute 트리거 — event-driven vs scheduled
 
 coupling으로 가른다(권장 heuristic이지 vendor 문서화 규칙 아님 — incremental/approximate PPR, dynamic-GNN도 존재).

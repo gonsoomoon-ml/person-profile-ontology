@@ -9,6 +9,49 @@
 파일: [`schema.md`](./schema.md)(데이터 모델) · [`load_and_query.py`](./load_and_query.py)(적재 + 6개
 프로파일링 쿼리) · [`advanced_queries.py`](./advanced_queries.py)(고급 6개) · [`BEGINNER-GUIDE.md`](./BEGINNER-GUIDE.md)(초보자 가이드) · [`IDEAS.md`](./IDEAS.md)(확장 아이디어 — 추천·프로파일).
 
+## 그래프 구조 (노드 · 엣지 · 속성)
+
+작은 property graph입니다 — **노드 6종 · 엣지 8종**. 정식 정의는 [`schema.md`](./schema.md). 괄호 안 숫자는 동봉 합성 데이터 기준 개수입니다.
+
+```text
+ ┌────────┐  PLACED   ┌────────┐    AT    ┌────────────┐  SERVES  ┌──────────┐
+ │  User  │ ────────▶ │ Order  │ ───────▶ │ Restaurant │ ───────▶ │ Cuisine  │
+ │  (8)   │           │ (27)   │          │   (11)     │          │  (6)     │
+ └────────┘           └───┬────┘          └────────────┘          └──────────┘
+                          │ CONTAINS     ┌────────┐   OF_CUISINE        ▲
+                          └────────────▶ │  Dish  │ ────────────────────┘
+                                         │  (17)  │
+                                         └────────┘
+   User ──LIVES_IN──▶ Region (3) ◀──LOCATED_IN── Restaurant
+   User ┄┄LIKES_CUISINE┄┄▶ Cuisine     (사용자가 "좋아한다고 말한" 선호 — stated)
+```
+
+**노드(Node) — 라벨 · 키 · 속성**
+
+| 노드 라벨 | 키 | 속성 | 개수 |
+|---|---|---|---|
+| `User` | `userId` | `name`, `ageBand`, `diet`(`none`/`vegetarian`/`vegan`/`halal`) | 8 |
+| `Restaurant` | `restId` | `name`, `priceTier`, `rating` | 11 |
+| `Cuisine` | `cuisineId` | `name` | 6 |
+| `Dish` | `dishId` | `name`, `vegetarian`(bool), `spicy`(bool) | 17 |
+| `Region` | `regionId` | `name` | 3 |
+| `Order` | `orderId` | `total` | 27 |
+
+> 💡 고급 알고리즘은 노드에 **계산 속성**을 덧씁니다 — PageRank → `pr`, Louvain → `community`.
+
+**엣지(Edge) — 관계 · 방향 · 의미**
+
+| 엣지 | From → To | 의미 |
+|---|---|---|
+| `LIVES_IN` | User → Region | 사용자가 사는 곳 |
+| `PLACED` | User → Order | 사용자의 주문 |
+| `AT` | Order → Restaurant | 주문을 처리한 식당 |
+| `CONTAINS` | Order → Dish | 주문 품목 |
+| `SERVES` | Restaurant → Cuisine | 식당의 요리 종류 |
+| `LOCATED_IN` | Restaurant → Region | 식당 위치 |
+| `OF_CUISINE` | Dish → Cuisine | 메뉴의 요리 종류 |
+| `LIKES_CUISINE` | User → Cuisine | **말한(stated)** 선호 — 행동(주문 경로)과 대비 |
+
 ## 할 수 있는 일 (무엇을 하나 → 결과)
 
 실행하지 않고도 이 시스템의 **12가지 기능**을 한눈에 이해할 수 있도록 정리했습니다. 각 셀은

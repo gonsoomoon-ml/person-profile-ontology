@@ -31,7 +31,9 @@ def table(rows):
     for r in rows:
         print("   " + " | ".join(cell(r.get(c, "")).ljust(w[c]) for c in cols))
 
-def section(title): print("\n### " + title)
+def section(title, desc):
+    print("\n### " + title)
+    print("   ▸ 무엇을 하나: " + desc)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -43,9 +45,13 @@ def main():
     c, gid = boto3.client("neptune-graph", region_name=args.region), args.graph_id
 
     print("="*78 + "\n고급 쿼리 — 음식 배달 사용자 프로파일링 그래프\n" + "="*78)
+    print("이 데모가 보여주는 것 (그래프 + 내장 알고리즘으로 할 수 있는 일):")
+    print("  1) 협업필터링 추천   2) 요리 동시출현(크로스셀)   3) 두 사용자 최단경로")
+    print("  4) Jaccard 유사도    5) PageRank 허브             6) Louvain 자동 세그먼트")
 
     section(f"1) '{args.a}' 협업 필터링(CF) 식당 추천 "
-            "(식당을 공유하는 이웃 → 그들의 미경험 식당)")
+            "(식당을 공유하는 이웃 → 그들의 미경험 식당)",
+            "나와 같은 식당을 가는 사람들이 가는 '내가 안 가본' 식당을 추천 — 행동 기반 추천(CF).")
     table(q(c, gid, """
         MATCH (me:User {name:$name})-[:PLACED]->(:Order)-[:AT]->(:Restaurant)
               <-[:AT]-(:Order)<-[:PLACED]-(peer:User)
@@ -55,7 +61,8 @@ def main():
         RETURN rec.name AS recommended, count(DISTINCT peer) AS peers, rec.rating AS rating
         ORDER BY peers DESC, rating DESC LIMIT 5""", {"name": args.a}))
 
-    section("2) 요리 동시출현 (장바구니: X를 주문하는 사용자가 Y도 주문)")
+    section("2) 요리 동시출현 (장바구니: X를 주문하는 사용자가 Y도 주문)",
+            "같은 사람이 함께 주문하는 요리 조합을 집계 — 크로스셀('A를 좋아하면 B도').")
     table(q(c, gid, """
         MATCH (u:User)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c1:Cuisine)
         MATCH (u)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c2:Cuisine)
@@ -63,13 +70,15 @@ def main():
         RETURN c1.name AS cuisineA, c2.name AS cuisineB, count(DISTINCT u) AS users
         ORDER BY users DESC, cuisineA LIMIT 8"""))
 
-    section(f"3) '{args.a}' ↔ '{args.b}' 최단 연결 경로")
+    section(f"3) '{args.a}' ↔ '{args.b}' 최단 연결 경로",
+            "두 사용자가 데이터상 어떻게 연결되는지 경로를 추적 — 설명가능성·관계 발견.")
     table(q(c, gid, """
         MATCH p=(a:User {name:$a})-[*1..6]-(b:User {name:$b})
         RETURN length(p) AS hops, [n IN nodes(p) | coalesce(n.name, labels(n)[0])] AS path
         ORDER BY hops ASC LIMIT 1""", {"a": args.a, "b": args.b}))
 
-    section(f"4) Jaccard 요리집합 유사도 '{args.a}' vs 다른 모든 사용자")
+    section(f"4) Jaccard 요리집합 유사도 '{args.a}' vs 다른 모든 사용자",
+            "두 사용자 취향 집합의 겹침을 0~1로 점수화 — 가장 비슷한 이웃 랭킹.")
     table(q(c, gid, """
         MATCH (a:User {name:$a})-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(ca:Cuisine)
         WITH a, collect(DISTINCT ca.name) AS A
@@ -81,14 +90,16 @@ def main():
                toFloat(size(inter))/(size(A)+size(B)-size(inter)) AS jaccard
         ORDER BY jaccard DESC LIMIT 5""", {"a": args.a}))
 
-    section("5) PageRank 중심성 (Neptune Analytics 알고리즘) — 그래프 허브")
+    section("5) PageRank 중심성 (Neptune Analytics 알고리즘) — 그래프 허브",
+            "그래프에서 가장 중심이 되는 노드(허브)를 계산 — 핵심 카테고리/영향력 식별.")
     q(c, gid, "CALL neptune.algo.pageRank.mutate({writeProperty:'pr', numOfIterations:20, dampingFactor:0.85}) YIELD success RETURN success")
     table(q(c, gid, """
         MATCH (n) WHERE n.pr IS NOT NULL
         RETURN labels(n)[0] AS type, coalesce(n.name,'?') AS name, n.pr AS pagerank
         ORDER BY pagerank DESC LIMIT 8"""))
 
-    section("6) Louvain 커뮤니티 탐지 (Neptune Analytics 알고리즘) — 자동 사용자 세그먼트")
+    section("6) Louvain 커뮤니티 탐지 (Neptune Analytics 알고리즘) — 자동 사용자 세그먼트",
+            "사용자를 취향 기반 커뮤니티로 자동 분할 — 라벨 없이 세그먼트 발견.")
     q(c, gid, "CALL neptune.algo.louvain.mutate({writeProperty:'community', maxLevels:3}) YIELD success RETURN success")
     table(q(c, gid, """
         MATCH (u:User)

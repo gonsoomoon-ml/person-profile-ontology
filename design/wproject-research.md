@@ -52,6 +52,40 @@
 
 ---
 
+### 🧭 Decision Box — 왜/언제 graph인가 (그리고 언제 *아닌가*)
+
+**핵심 원칙:** graph는 "데이터 저장소"가 아니라 **관계·설명·안전 레이어**다. 대용량은 graph 밖(OLAP·feature store).
+
+**graph를 쓴다 — 아래 중 하나라도 필요할 때:**
+- **multi-hop 관계 탐색** (look-alike, "이걸 좋아한 사람은 저것도…")
+- **설명가능성** (typed meta-path = reason string, "매운 한식+심야라서 추천")
+- **연결된 엔티티 제약/안전** (diet/allergen)
+
+**graph를 *쓰지 않는다* — over-engineering:**
+- 점수/추천만 필요 → feature store + two-tower + rules로 충분
+- 관계가 1-hop·flat → RDB/columnar가 더 단순·저렴
+- 설명·안전이 hard requirement가 아님
+
+**무엇을 graph에 두나 (vs 안 두나):**
+
+| IN (graph) | OUT (graph 밖) |
+|---|---|
+| 관계 skeleton (typed nodes + links) | order firehose → CDC stream |
+| hot-path용 pruned in-memory snapshot | full order history → OLAP |
+| | hot per-user scalar(RFM·affinity) → feature store |
+
+**규칙 한 줄:** *관계는 graph, latency는 feature store, volume은 OLAP.*
+
+**look-alike의 cold-start 경로 (주문 이력이 없어도 가능 — fixture 검증):**
+- `[fixture-real]` `User→LIKES_CUISINE→Cuisine←SERVES←Restaurant` — 선언 취향(주문과 무관)에서 출발
+- `[fixture-real]` `User→LIVES_IN→Region←LOCATED_IN←Restaurant` — 같은 지역에서 출발
+- `[design-target]` `User→HAS_DIET→DietConstraint`, `User→AVOIDS→Ingredient←CONTAINS←Dish` — **현 fixture엔 없음** (diet=`User.diet` 스칼라, 안전=`Dish.vegetarian` 라벨). composition 기반 안전은 fixture 확장 후 가능.
+- 신호가 전무(주문·선언·지역 모두 없음)면 → 글로벌/지역 인기로 fallback (어떤 방법도 동일).
+
+**W 프로젝트 판정:** hero(설명가능·diet-safe 추천 + look-alike)가 위 3조건을 모두 요구 → **graph 정당.** 단 firehose·full history·hot scalar는 graph 밖 (cf. §9.5 3-tier 결정표).
+
+---
+
 ## 1. 문제 정의 — 푸드 딜리버리 User Profiling
 
 ### 1.1 왜 User Profiling인가 — CX 레버
@@ -515,6 +549,41 @@ LLM-as-judge와 추천 품질을 분리해 평가한다.
 - **two-tower retrieve-then-rank**는 개념적으로만 미러링(offline item embedding + ANN) — 그 규모는 불필요.
 - **Fairness**: 음식배달 **소비자 추천** fairness 벤치마크는 존재하지 않는다. FairEval의 34.79% disparity는 music/movie 도메인이고([arXiv 2504.07801](https://arxiv.org/abs/2504.07801)), Deliveroo 판례는 gig-worker(소비자 아님) 사례다. 따라서 fairness는 처방적 guidance로 제시: proxy discrimination(cuisine/neighborhood/timing이 income/ethnicity를 encode — 보호속성 제거가 bias를 제거하지 않음) 감사와 counterfactual stability 체크(ageBand/region flip 시 추천 안정성)로 대응한다.
 
+### 7.7 우선순위 — 비즈니스 임팩트 × 비용 (phased rollout)
+
+**핵심: 비즈니스 가치의 대부분은 *싼* 부분에서 나온다.** graph cluster·streaming·embedding·GNN(비싼 조각)은 첫 달러의 가치가 나오는 곳이 아니다. **impact ÷ cost**로 우선순위를 잡고, 비싼 infra는 가치가 증명된 뒤 추가.
+
+| 역량 | 비즈니스 임팩트 | 비용/노력 | 판정 |
+|---|---|---|---|
+| 배치 프로필(RFM·revealed affinity) + KV cache | High (기반·재주문 nudge) | Low (warehouse SQL) | 🟢 Phase 1 |
+| 단순 추천(fav cuisine + region + 미주문) | High (직접 conversion) | Low | 🟢 Phase 1 |
+| diet/allergen 안전 필터(label) + 실시간 enforcement | High (risk·compliance·trust) | Low (필터) | 🟢 Phase 1 |
+| cold-start(region/declared popularity) | High (신규 활성화) | Low | 🟢 Phase 1 |
+| stated-vs-revealed flag(hero) | Med-High (re-targeting) | Low (agg) | 🟢 cheap win |
+| look-alike / CF(top-k 이웃) | Med-High (lookalike·cross-sell) | Medium (cross-user) | 🟡 Phase 2 |
+| graph DB(Neptune) | Medium (설명+multi-hop+composition-safety일 때만) | Med-High (상시 cluster) | 🟡 Phase 2 (위 3개 중요할 때만) |
+| 실시간 streaming(CDC/Flink) | 안전 override엔 High, 일반 freshness엔 incremental | High (상시 infra) | 🟡 안전 슬라이스 먼저 |
+| two-tower + ANN | High (at scale) | High (학습+서빙) | 🟠 Phase 3 |
+| composition 기반 allergen 안전(Ingredient layer) | High (진짜 안전) | High (FoodOn 데이터 구축) | 🟠 Phase 3 |
+| PageRank / Louvain segment | Low-Med (마케팅 분석, 간접) | Medium | 🔵 매일 말고 주간 |
+| LightGCN / GNN | PPR 대비 delta 불확실 | High (GPU) | 🔴 보류 |
+| Agentic LLM(전면) | UX delight, 간접 | Variable (API) | 🔴 thin slice만 |
+
+**Phased rollout (비용 태세):**
+- **Phase 0 — Notebook PoC (≈$0, 현재 W 산출물):** 어떤 역량이 실제 지표를 올리는지 측정 → 무엇에 돈 쓸지 결정하는 *가장 싼 de-risking*.
+- **Phase 1 — Crawl (low $):** batch SQL → KV cache → rule 추천 + 안전 필터 + cold-start. **graph/streaming/embedding 없이** ~80% 가치.
+- **Phase 2 — Walk (med $):** 설명·multi-hop·composition-safety가 증명되면 graph DB; 안전 override 슬라이스에 streaming; CF/look-alike batch.
+- **Phase 3 — Run (high $):** two-tower+ANN, daily graph algo, agentic UX — Phase 1·2가 plateau하고 scale이 요구할 때.
+
+**비용 레버 (중요도 순):**
+1. **활성 10M만 계산** (전체 30M 매일 X). dormant는 주간/복귀 시. ← 최대 절약.
+2. **가치 기준 cadence** — hero/affinity/추천=daily, PageRank/segment(마케팅용)=**주간**, GNN=드물게.
+3. **incremental > full recompute**, **pruned snapshot > 상시 대형 graph cluster**.
+4. **안 쓸 값은 계산 안 함** (추천/결정을 안 바꾸면 불필요).
+5. **graph는 가장 작은 tier** — 설명·안전·multi-hop이 진짜 우선일 때만 graph infra 투자; 아니면 batch+KV가 더 싸고 충분.
+
+**Bottom line:** 30M/10M-DAU 기계를 처음부터 짓지 말 것. 매출 레버(추천+안전+cold-start)는 **batch+KV+단순 필터**로 첫 80%; graph·streaming·embedding은 **노트북/Phase-1 지표가 ROI를 증명한 곳에만** 추가 — *기본값이 아니라 벌어서 얻는 것*.
+
 ---
 
 ## 8. 노트북 설계 — 합성 데이터 테스트 구현
@@ -649,6 +718,39 @@ LLM-as-judge와 추천 품질을 분리해 평가한다.
 
 ### 9.0 핵심 결론 한 줄
 주문/이벤트 firehose를 **graph에 동기 write하지 않는다.** OLTP를 source of truth로 두고 log-based CDC를 freshness spine으로 삼아, graph(관계·traversal·설명) / online feature store(hot 저지연) / OLAP(대량 집계·batch profile)의 **3-tier로 fan-out** 한다. Uber Michelangelo의 "two pipelines, one online store"와 Pinterest Pixie의 "offline에서 prune+materialize, snapshot에서 serve"가 검증된 anchor다 ([Michelangelo](https://www.uber.com/blog/michelangelo-machine-learning-platform/), [Pixie WWW'18](https://cs.stanford.edu/people/jure/pubs/pixie-www18.pdf)).
+
+---
+
+#### 📐 [Box] 실현 가능성(feasibility) — 정말 되나?
+
+**결론: 가능 — 우리보다 큰 시스템이 이미 매일 이렇게 돌린다. 단, tiering을 지킬 때만.**
+
+**존재 증명 (우리 규모보다 큼):**
+- **Pixie(Pinterest)**: 30억 노드 / 170억 엣지를 pruned하여 단일 머신 ~120GB RAM에 적재, **매일 reload**, 1,200 req/s @ 60ms ([Pixie](https://cs.stanford.edu/people/jure/pubs/pixie-www18.pdf)). 우리 user-graph는 훨씬 작다.
+- **Uber Michelangelo**: batch feature를 *"every few hours or once a day"* 미리 계산, 250k pred/s, P95 <5–10ms ([Uber](https://www.uber.com/blog/michelangelo-machine-learning-platform/)).
+- **Neptune Analytics**: *"tens of billions of relationships, thousands of analytic queries/sec"* ([doc](https://docs.aws.amazon.com/neptune-analytics/latest/userguide/neptune-analytics-vs-neptune-database.html)).
+
+**우리 일일 작업 back-of-envelope (rough):**
+
+| 작업 | 대략 규모 | 가능? |
+|---|---|---|
+| per-user 피처 재계산 (affinity/RFM/hero, ~90일 window) | 30M users × 수십억 row group-by (Spark/BQ) | ✅ nightly window 내 |
+| 피처 → online store 적재 | ~30M × 수 KB = 수십 GB batch write | ✅ routine |
+| graph **skeleton** snapshot | single-digit-B edges | ✅ Pixie가 17B를 pruned RAM에 |
+| global PageRank/embedding nightly | 수십억 edges | ✅ Neptune Analytics 문서 범위 |
+| ANN index | full rebuild "수 시간" | ✅ nightly + 사이 incremental |
+
+→ 30M은 위 사례들보다 **작다**. 이게 핵심.
+
+**❌ 불가능해지는 red lines (tiering 위반 시):**
+- full order history를 **live graph에 다 적재** → 수십억 Order 노드, single-writer 질식 → history는 OLAP
+- **firehose 동기 write** → single-writer 병목 → CDC + micro-batch
+- 매일 **전체 full reload** → 수 시간·위험 → reload=skeleton만, routine=incremental upsert
+- **GNN/LightGCN을 매일 full-graph 학습** → 비쌈 → sample 또는 낮은 cadence
+
+**정직성:** vendor 수치는 *다른 워크로드의 존재 증명*이지 우리 SLO가 아니다 — 아키텍처가 scale함을 증명할 뿐, 실제 latency는 PoC→benchmark 후 commit. 그러나 scale wall은 없다(이미 더 큰 규모가 매일 돌고 있다).
+
+---
 
 ### 9.1 30M / 10M DAU에서 진짜 병목 — 저장 용량이 아니다
 검증된 사실로 먼저 오해를 제거한다.
@@ -821,6 +923,25 @@ CDC stream 위에서 seconds-to-low-minutes 신선도로 계산해 같은 online
 **왜 PPR/RWR는 batch인가:** 단일 새 edge가 많은 노드 점수를 교란하므로 global recompute는 자연히 스케줄된다. 단 이는 **방어적 엔지니어링 추론**이다 — live RWR가 예산 초과라고 증명한 출처는 없으며(incremental/approximate PPR·dynamic-GNN은 실재), commit 전 실제 W 워크로드를 benchmark한다.
 
 **요청-시점 merge:** ① online store에서 batch feature를 key로 read → ② 같은 key의 더 신선한 streaming 값으로 overlay(latest-write-wins, eventual consistency) → ③ on-demand transform 계산 → ④ retrieval → rank → reason-path → **consent + PII gate** → propose-then-apply `apply_action()`(locked decision 6).
+
+**쿼리별 매핑 (fixture 12 쿼리 → RT/Batch).** §10.5 차원 매핑을 실제 `neptune-demo` 쿼리에 적용. (fixture 규모에선 전부 live ms; 아래는 30M-scale 구현 기준.)
+
+| 쿼리 (fixture) | RT / Batch | 이유 | 어디에 / cadence |
+|---|---|---|---|
+| 1) revealed affinity | **BATCH** | per-user 전체 이력 agg | feature store, daily |
+| 2) profile card | **BATCH** | wide per-user rollup | feature store, daily |
+| 3) restaurant rec (fav+region+미주문) | **HYBRID** | candidate=batch, "미주문"+geo/ETA=fresh | candidate daily → **request 시 final filter/rank** |
+| 4) look-alike (shared cuisine, all-pairs) | **BATCH** | O(users²) cross-user | **top-k 이웃/user** 저장, daily |
+| 5) diet-safe rec | **HYBRID ⚠️** | candidate=batch, **안전 hard-prune=최신 override→RT** | candidate daily, **enforcement at request** |
+| 6) stated-vs-revealed (hero) | **BATCH** | 전체 이력 agg vs declared | feature store, daily |
+| adv 1) collaborative filtering | **BATCH** | cross-user peer | recs precompute, daily |
+| adv 2) cuisine co-occurrence | **BATCH** | global basket agg | daily |
+| adv 3) shortest path (explain) | **REAL-TIME** | single-pair, on-demand "why?" | request 시 |
+| adv 4) Jaccard similarity | **BATCH**(all-pairs) / on-demand(1쌍) | look-alike와 동일 | 이웃 list daily |
+| adv 5) PageRank | **BATCH** | global centrality | nightly `.mutate()` → `pr` |
+| adv 6) Louvain segment | **BATCH** | global community | nightly `.mutate()` → `community` |
+
+**진짜 REAL-TIME은 4개뿐** (나머지는 precompute된 값 lookup): ① 안전 enforcement(쿼리5, 최신 override) ② 최종 filter+rank(쿼리3, 미주문·geo/time) ③ 설명 경로(adv3, on-demand) ④ cold-start fallback(신규 user, batch 프로필 없음 → declared+region live).
 
 ### 10.6 precomputed-rec vs on-demand-traversal tradeoff
 

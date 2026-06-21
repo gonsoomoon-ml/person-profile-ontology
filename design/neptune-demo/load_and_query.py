@@ -100,11 +100,13 @@ def load(client, gid):
 
 QUERIES = [
     ("1) 드러난 요리 선호도 (사용자 × 요리 주문 수)",
+     "각 사용자가 실제 주문에서 어떤 요리를 얼마나 주문했는지 집계 — 행동 기반 취향 파악.",
      """MATCH (u:User)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c:Cuisine)
         RETURN u.name AS user, c.name AS cuisine, count(*) AS orders
         ORDER BY user, orders DESC"""),
 
-    ("2) 프로파일 카드 (최애 요리·주문 수·총지출·식이)",
+    ("2) 프로파일 카드 (최애 요리·주문 수·총지출·식이 제한)",
+     "사용자별 한 줄 요약을 자동 생성 — 한눈에 고객을 이해.",
      """MATCH (u:User)-[:PLACED]->(o:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c:Cuisine)
         WITH u, c, count(*) AS cnt, sum(o.total) AS spend
         ORDER BY cnt DESC
@@ -113,6 +115,7 @@ QUERIES = [
         ORDER BY totalSpend DESC"""),
 
     ("3) 식당 추천 (최애 요리·같은 지역·미주문)",
+     "최애 요리·같은 지역·아직 안 가본 식당을 추천 — 개인화로 다음 주문 유도.",
      """MATCH (u:User)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c:Cuisine)
         WITH u, c, count(*) AS aff ORDER BY aff DESC
         WITH u, collect(c)[0] AS fav
@@ -124,13 +127,16 @@ QUERIES = [
         ORDER BY user"""),
 
     ("4) 룩어라이크 사용자 (공동 주문으로 공유된 요리)",
+     "요리가 겹치는 사용자 쌍을 찾음 — 타겟 확장·협업 추천의 기반.",
      """MATCH (a:User)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c:Cuisine)
-              <-[:SERVES]-(:Restaurant)<-[:AT]-(:Order)<-[:PLACED]-(b:User)
+        MATCH (b:User)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c)
         WHERE a.userId < b.userId
-        RETURN a.name AS userA, b.name AS userB, count(DISTINCT c.name) AS sharedCuisines
+        RETURN a.name AS userA, b.name AS userB, count(DISTINCT c) AS sharedCuisines,
+               collect(DISTINCT c.name) AS cuisines
         ORDER BY sharedCuisines DESC, userA LIMIT 8"""),
 
-    ("5) 식이 고려 메뉴 추천 (채식/비건: 최애 요리의 미경험 채식 메뉴)",
+    ("5) 식이 제한 고려 메뉴 추천 (채식/비건: 최애 요리의 미경험 채식 메뉴)",
+     "채식/비건 사용자에게 안전한(채식) 메뉴만 추천 — 안전·규정 준수.",
      """MATCH (u:User) WHERE u.diet IN ['vegetarian','vegan']
         MATCH (u)-[:PLACED]->(:Order)-[:CONTAINS]->(:Dish)-[:OF_CUISINE]->(c:Cuisine)
         WITH u, c, count(*) AS aff ORDER BY aff DESC
@@ -142,6 +148,7 @@ QUERIES = [
         ORDER BY user"""),
 
     ("6) 말한 것 vs 실제 선호 (프로파일링 mismatch 신호)",
+     "선언한 선호(LIKES_CUISINE)와 실제 주문을 비교해 불일치 탐지 — '말 vs 행동' 핵심 신호.",
      """MATCH (u:User)-[:LIKES_CUISINE]->(stated:Cuisine)
         OPTIONAL MATCH (u)-[:PLACED]->(:Order)-[:AT]->(:Restaurant)-[:SERVES]->(c:Cuisine)
         WITH u, stated, c, count(c) AS cnt ORDER BY cnt DESC
@@ -180,8 +187,12 @@ def main():
         load(client, gid)
 
     print("\n" + "="*78 + "\n사용자 프로파일링 쿼리\n" + "="*78)
-    for title, cypher in QUERIES:
+    print("이 데모가 보여주는 것:")
+    print("  1) 드러난 요리 선호도  2) 프로파일 카드   3) 식당 추천")
+    print("  4) 룩어라이크 사용자   5) 식이 제한 고려 추천  6) 말한 것 vs 실제(mismatch)")
+    for title, desc, cypher in QUERIES:
         print("\n### " + title)
+        print("   ▸ 무엇을 하나: " + desc)
         print_table(q(client, gid, cypher))
 
 if __name__ == "__main__":
